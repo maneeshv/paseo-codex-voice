@@ -2,6 +2,7 @@
   "id": "codex-voice",
   "name": "Codex Voice",
   "description": "Talk to a Codex voice coordinator and manage Paseo agents from a desktop panel.",
+  "icon": "assets/codex-voice.png",
   "requirements": {
     "paseo": ">=0.14.0 <0.15.0"
   }
