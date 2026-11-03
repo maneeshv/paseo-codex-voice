@@ -1,10 +1,42 @@
-import type { PluginButtonRegistration, PluginClientContext } from '@getpaseo/plugin/client';
+import type { PluginButtonRegistration, PluginClientContext, PluginScreenProps } from '@getpaseo/plugin/client';
+import { getCallTarget } from '@/client/call-targets';
+import { voicePillButton } from '@/client/live-status';
 import { AgentVoicePanel, WorkspaceVoicePanel } from '@/client/panel';
 import { VoiceScreen, VoiceSidebarItem } from '@/client/screen';
+import { listVoiceSessions, type ActiveVoiceSession } from '@/shared/contracts';
+
+const PILL_POLL_MS = 1500;
 
 export default function contribute(client: PluginClientContext) {
+  const lifetime = new AbortController();
+
+  const openSession = async (sessionId: string) => {
+    // The management screen can explain an ended call; never silently open a fresh call view.
+    const fallback = () => client.openScreen({ screenId: 'codex-voice', params: { sessionId } });
+    try {
+      const { sessions } = await client.rpc(listVoiceSessions, {});
+      if (lifetime.signal.aborted) return;
+      if (!sessions.some((session) => session.sessionId === sessionId)) return fallback();
+    } catch {
+      if (lifetime.signal.aborted) return;
+      return fallback();
+    }
+    const target = getCallTarget(sessionId);
+    // No local target means the audio lives in another view or device: manage it, don't re-open it.
+    if (!target) return fallback();
+    client.openPanel(target.panelId, { workspaceId: target.workspaceId, agentId: target.agentId });
+  };
+
+  const ScreenComponent = (props: PluginScreenProps) => (
+    <VoiceScreen
+      {...props}
+      openWorkspaceVoice={(workspaceId) => client.openPanel('codex-voice', { workspaceId })}
+      openSession={(sessionId) => void openSession(sessionId)}
+    />
+  );
+
   const removers = [
-    client.addScreen({ id: 'codex-voice', title: 'Codex Voice', Component: VoiceScreen }),
+    client.addScreen({ id: 'codex-voice', title: 'Codex Voice', Component: ScreenComponent }),
     client.addSidebarHeaderItem({ id: 'codex-voice', title: 'Codex Voice', Component: VoiceSidebarItem }),
     client.addWorkspacePanel({
       id: 'codex-voice',
@@ -30,9 +62,7 @@ export default function contribute(client: PluginClientContext) {
     }),
   ];
 
-  const pills = new Map<string, PluginButtonRegistration>();
   const headers = new Map<string, PluginButtonRegistration>();
-  const lifetime = new AbortController();
   const registerWorkspace = ({ id: workspaceId }: { id: string }) => {
     if (lifetime.signal.aborted || headers.has(workspaceId)) return;
     headers.set(workspaceId, client.addHeaderButton({
@@ -65,34 +95,67 @@ export default function contribute(client: PluginClientContext) {
   }).catch((error) => {
     if (!lifetime.signal.aborted) console.error('Codex Voice workspace observation failed', error);
   });
-  const register = (agent: { id: string; workspaceId?: string | null }) => {
-    if (lifetime.signal.aborted || !agent.workspaceId) return;
-    const agentId = agent.id;
-    const workspaceId = agent.workspaceId;
-    pills.get(agentId)?.remove();
-    pills.set(
-      agentId,
-      client.addComposerPill({
-        id: 'codex-voice',
-        workspaceId,
-        agentId,
-        button: {
-          title: 'Codex Voice',
-          icon: 'AudioLines',
-          behavior: {
-            kind: 'action',
-            onPress() {
-              client.openPanel('codex-voice-agent', { workspaceId, agentId });
-            },
-          },
-        },
-      }),
-    );
+
+  // Composer pills reflect existing calls only: eligible agents x polled session inventory.
+  const agents = new Map<string, string>(); // agentId -> workspaceId
+  const pills = new Map<string, { key: string; registration: PluginButtonRegistration }>();
+  let inventory: ActiveVoiceSession[] = [];
+
+  const reconcile = () => {
+    if (lifetime.signal.aborted) return;
+    for (const [agentId, pill] of pills) {
+      if (!agents.has(agentId)) {
+        pill.registration.remove();
+        pills.delete(agentId);
+      }
+    }
+    for (const [agentId, workspaceId] of agents) {
+      // The workspace coordinator (no agentId) belongs to every chat of its workspace;
+      // another chat's agent call must not show here.
+      const matches = inventory
+        .filter((session) => session.workspaceId === workspaceId && (!session.agentId || session.agentId === agentId))
+        .sort((a, b) => a.createdAt - b.createdAt);
+      const existing = pills.get(agentId);
+      if (matches.length === 0) {
+        existing?.registration.remove();
+        pills.delete(agentId);
+        continue;
+      }
+      const key = matches.map((session) => `${session.sessionId}:${session.status}`).join('|');
+      if (existing?.key === key) continue;
+      const button = voicePillButton(matches, (sessionId) => void openSession(sessionId));
+      if (existing) {
+        existing.registration.update(button);
+        existing.key = key;
+      } else {
+        pills.set(agentId, { key, registration: client.addComposerPill({ id: 'codex-voice', workspaceId, agentId, button }) });
+      }
+    }
   };
   const removePills = () => {
-    for (const pill of pills.values()) pill.remove();
+    for (const pill of pills.values()) pill.registration.remove();
     pills.clear();
   };
+
+  // Non-overlapping inventory poll; an error drops the inventory so no stale pill claims a call.
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  const poll = async () => {
+    try {
+      const { sessions } = await client.rpc(listVoiceSessions, {});
+      inventory = sessions;
+    } catch {
+      inventory = [];
+    }
+    if (lifetime.signal.aborted) return;
+    try {
+      reconcile();
+    } catch (error) {
+      console.error('Codex Voice pill update failed', error);
+    } finally {
+      if (!lifetime.signal.aborted) pollTimer = setTimeout(() => void poll(), PILL_POLL_MS);
+    }
+  };
+  void poll();
 
   // Owned list subscription: existing agents arrive in snapshots, changes as updates.
   void client.paseo.agents
@@ -100,15 +163,20 @@ export default function contribute(client: PluginClientContext) {
     .then(({ subscription }) => {
       subscription.subscribe({
         snapshot: ({ entries }) => {
-          removePills();
-          for (const { agent } of entries) register(agent);
+          agents.clear();
+          for (const { agent } of entries) if (agent.workspaceId) agents.set(agent.id, agent.workspaceId);
+          reconcile();
         },
         update: (message) => {
           if (message.type !== 'agent_update') return;
           const update = message.payload;
-          if (update.kind === 'upsert') return register(update.agent);
-          pills.get(update.agentId)?.remove();
-          pills.delete(update.agentId);
+          if (update.kind === 'upsert') {
+            if (update.agent.workspaceId) agents.set(update.agent.id, update.agent.workspaceId);
+            else agents.delete(update.agent.id);
+          } else {
+            agents.delete(update.agentId);
+          }
+          reconcile();
         },
       });
       return undefined;
@@ -119,6 +187,7 @@ export default function contribute(client: PluginClientContext) {
 
   return () => {
     lifetime.abort();
+    if (pollTimer !== undefined) clearTimeout(pollTimer);
     removePills();
     removeHeaders();
     for (const remove of removers) remove();

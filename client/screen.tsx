@@ -1,9 +1,11 @@
-import { usePaseo, type PluginScreenProps, type PluginSidebarItemProps } from '@getpaseo/plugin/client';
+import { usePaseo, useSettings, type PluginScreenProps, type PluginSidebarItemProps } from '@getpaseo/plugin/client';
 import type { PaseoWorkspace as Workspace } from '@getpaseo/client';
 import { SidebarRow } from '@getpaseo/plugin/client/ui';
 import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
-import { VoiceView } from '@/client/panel';
+import { ActiveSessions, useActiveSessions } from '@/client/active-sessions';
+import { VoiceSelector } from '@/client/voice-selector';
+import { voiceSettings } from '@/shared/contracts';
 
 const SEARCH_THRESHOLD = 30;
 
@@ -12,10 +14,41 @@ const directory = (workspace: Workspace) => workspace.workspaceDirectory ?? work
 const message = (error: unknown) =>
   error instanceof Error && error.message ? error.message : 'Could not load workspaces.';
 
-export function VoiceSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
+export function VoiceSidebarItem({ theme, host, currentScreen, openScreen }: PluginSidebarItemProps) {
+  const { sessions, error } = useActiveSessions(host.id);
+  const live = sessions?.filter((session) => session.status === 'live').length ?? 0;
+  const connecting = (sessions?.length ?? 0) - live;
+  // Mixed statuses spell out both counts so a green dot never claims every call is live.
+  const statusText =
+    live > 0 && connecting > 0
+      ? `${live} Live · ${connecting} Connecting`
+      : live > 0
+        ? live === 1
+          ? 'Live'
+          : `${live} Live`
+        : connecting === 1
+          ? 'Connecting'
+          : `${connecting} Connecting`;
+  // No trailing claims zero before the first successful poll; errors say the status is unknown.
+  const trailing =
+    !error && sessions && sessions.length > 0 ? (
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+        <View
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: 4,
+            backgroundColor: live > 0 ? theme.colors.statusSuccess : theme.colors.statusWarning,
+          }}
+        />
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{statusText}</Text>
+      </View>
+    ) : undefined;
   return (
     <SidebarRow
       icon="AudioLines"
+      label={error ? 'Codex Voice · status unavailable' : undefined}
+      trailing={trailing}
       active={currentScreen?.screenId === 'codex-voice'}
       onPress={() => openScreen({ screenId: 'codex-voice' })}
     />
@@ -27,18 +60,26 @@ type LoadState =
   | { phase: 'error'; error: string }
   | { phase: 'ready'; workspaces: Workspace[] };
 
-export function VoiceScreen({ theme, layout, host }: PluginScreenProps) {
+export type VoiceScreenProps = PluginScreenProps & {
+  /** Starts (or reveals) the workspace voice panel, which owns the call's audio. */
+  openWorkspaceVoice(workspaceId: string): void;
+  /** Reveals an existing call's owning panel, or this screen in management mode. */
+  openSession(sessionId: string): void;
+};
+
+export function VoiceScreen({ theme, layout, host, navigation, params, openWorkspaceVoice, openSession }: VoiceScreenProps) {
   const paseo = usePaseo();
+  const settings = useSettings(voiceSettings);
+  const managedSessionId = params.sessionId;
   const [state, setState] = useState<LoadState>({ phase: 'loading' });
-  const [selected, setSelected] = useState<Workspace | null>(null);
   const [query, setQuery] = useState('');
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    if (managedSessionId) return;
     // workspaces.list in SDK 0.14 has no AbortSignal; a cancelled flag drops late responses.
     let cancelled = false;
-    // A host change points at another daemon: its workspace ids are unrelated, so drop the selection.
-    setSelected(null);
+    // A host change points at another daemon: its workspace ids are unrelated, so drop the query.
     setQuery('');
     setState({ phase: 'loading' });
     paseo.workspaces
@@ -52,7 +93,7 @@ export function VoiceScreen({ theme, layout, host }: PluginScreenProps) {
     return () => {
       cancelled = true;
     };
-  }, [paseo, host.id, attempt]);
+  }, [paseo, host.id, attempt, managedSessionId]);
 
   const workspaces = state.phase === 'ready' ? state.workspaces : [];
   const filtered = useMemo(() => {
@@ -106,37 +147,24 @@ export function VoiceScreen({ theme, layout, host }: PluginScreenProps) {
       row: { paddingVertical: 8, paddingHorizontal: 10, borderRadius: 6, gap: 2 },
       rowName: { color: theme.colors.foreground, fontSize: 14, fontWeight: '500' as const },
       rowDirectory: { color: theme.colors.foregroundMuted, fontSize: 12 },
-      selectedBar: {
-        flexDirection: 'row' as const,
-        alignItems: 'center' as const,
-        justifyContent: 'space-between' as const,
-        gap: 8,
-      },
-      selectedName: { color: theme.colors.foreground, fontSize: 14, fontWeight: '600' as const, flexShrink: 1 },
-      voice: { flex: 1 },
     };
   }, [theme, layout.compact]);
 
-  if (selected) {
+  if (managedSessionId) {
+    // Management-only view of an existing call: status, context, and Stop; never a new call.
     return (
       <View style={styles.screen}>
-        <View style={styles.selectedBar}>
-          <Text style={styles.selectedName} numberOfLines={1}>
-            {displayName(selected)}
-          </Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Change workspace (ends call)"
-            onPress={() => setSelected(null)}
-            style={styles.secondary}
-          >
-            <Text style={styles.secondaryText}>Change workspace (ends call)</Text>
-          </Pressable>
-        </View>
-        {/* Keyed by host and workspace so switching unmounts VoiceView and ends the call. */}
-        <View key={`${host.id}:${selected.id}`} style={styles.voice}>
-          <VoiceView theme={theme} layout={layout} workspaceId={selected.id} />
-        </View>
+        <Text style={styles.title}>Codex Voice</Text>
+        <Text style={styles.subtitle}>
+          This call's microphone and audio stay with the view and device that started it.
+        </Text>
+        <ActiveSessions
+          key={host.id}
+          theme={theme}
+          host={host}
+          navigation={navigation}
+          sessionId={managedSessionId}
+        />
       </View>
     );
   }
@@ -145,6 +173,8 @@ export function VoiceScreen({ theme, layout, host }: PluginScreenProps) {
     <View style={styles.screen}>
       <Text style={styles.title}>Codex Voice</Text>
       <Text style={styles.subtitle}>Choose a workspace to start a voice call.</Text>
+      <ActiveSessions key={host.id} theme={theme} host={host} navigation={navigation} onOpenCall={openSession} />
+      <VoiceSelector hostId={host.id} settings={settings} />
       {state.phase === 'loading' ? <Text style={styles.muted}>Loading workspaces…</Text> : null}
       {state.phase === 'error' ? (
         <View style={styles.errorBox}>
@@ -182,8 +212,8 @@ export function VoiceScreen({ theme, layout, host }: PluginScreenProps) {
                   <Pressable
                     key={workspace.id}
                     accessibilityRole="button"
-                    accessibilityLabel={`Use workspace ${displayName(workspace)}`}
-                    onPress={() => setSelected(workspace)}
+                    accessibilityLabel={`Start voice in workspace ${displayName(workspace)}`}
+                    onPress={() => openWorkspaceVoice(workspace.id)}
                     style={styles.row}
                   >
                     <Text style={styles.rowName}>{displayName(workspace)}</Text>

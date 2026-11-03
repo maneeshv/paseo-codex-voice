@@ -1,12 +1,14 @@
-import { useRpc, type PluginAgentPanelProps, type PluginWorkspacePanelProps } from '@getpaseo/plugin/client';
+import { useRpc, useSettings, type PluginAgentPanelProps, type PluginWorkspacePanelProps } from '@getpaseo/plugin/client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { rememberCallTarget } from '@/client/call-targets';
+import { VoiceSelector } from '@/client/voice-selector';
 import { createVoicePeer, isVoiceSupported, type VoicePeer } from '@/client/web';
-import { pollVoice, sendText, startVoice, stopVoice, type VoiceEvent } from '@/shared/contracts';
+import { pollVoice, sendText, startVoice, stopVoice, voiceSettings, type VoiceEvent } from '@/shared/contracts';
 
 type Phase = 'ready' | 'connecting' | 'live' | 'error';
 // Identity object per call so callbacks from an ended call can never touch a newer one.
-type Call = { controller: AbortController; peer?: VoicePeer; sessionId?: string };
+type Call = { controller: AbortController; peer?: VoicePeer; sessionId?: string; forgetTarget?: () => void };
 
 const MAX_LOG = 200;
 
@@ -37,13 +39,16 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
 const message = (error: unknown, fallback: string) =>
   error instanceof Error && error.message ? error.message : fallback;
 
-type VoiceViewProps = Pick<PluginWorkspacePanelProps, 'theme' | 'layout' | 'workspaceId'> & { agentId?: string };
+type VoiceViewProps = Pick<PluginWorkspacePanelProps, 'theme' | 'layout' | 'host' | 'workspaceId'> & {
+  agentId?: string;
+};
 
-export function VoiceView({ theme, layout, workspaceId, agentId }: VoiceViewProps) {
+export function VoiceView({ theme, layout, host, workspaceId, agentId }: VoiceViewProps) {
   const start = useRpc(startVoice);
   const poll = useRpc(pollVoice);
   const stop = useRpc(stopVoice);
   const send = useRpc(sendText);
+  const settings = useSettings(voiceSettings);
 
   const [phase, setPhase] = useState<Phase>('ready');
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +63,7 @@ export function VoiceView({ theme, layout, workspaceId, agentId }: VoiceViewProp
   const endCall = (call: Call, failure?: string) => {
     if (callRef.current !== call) return;
     callRef.current = null;
+    call.forgetTarget?.();
     call.controller.abort(); // closes the peer, microphone, and playback via client/web.ts
     if (call.sessionId) void stop({ sessionId: call.sessionId }).catch(() => {});
     if (!mountedRef.current) return;
@@ -96,7 +102,8 @@ export function VoiceView({ theme, layout, workspaceId, agentId }: VoiceViewProp
   };
 
   const handleStart = async () => {
-    if (callRef.current) return;
+    // The server reads the saved voice preference; wait for settings so a pending save is not raced.
+    if (callRef.current || settings.status !== 'ready' || settings.saving) return;
     const call: Call = { controller: new AbortController() };
     callRef.current = call;
     setPhase('connecting');
@@ -118,6 +125,9 @@ export function VoiceView({ theme, layout, workspaceId, agentId }: VoiceViewProp
         return;
       }
       call.sessionId = started.sessionId;
+      call.forgetTarget = rememberCallTarget(started.sessionId, {
+        panelId: agentId ? 'codex-voice-agent' : 'codex-voice', workspaceId, agentId,
+      });
       await peer.acceptAnswer(started.answerSdp);
       if (callRef.current !== call) return;
       await runPoll(call, started.sessionId);
@@ -208,6 +218,7 @@ export function VoiceView({ theme, layout, workspaceId, agentId }: VoiceViewProp
 
   const supported = isVoiceSupported();
   const callActive = phase === 'connecting' || phase === 'live';
+  const canStart = settings.status === 'ready' && !settings.saving;
   const canSend = phase === 'live' && draft.trim().length > 0 && !sending;
   const status: Record<Phase, { label: string; color: string }> = {
     ready: { label: 'Ready', color: theme.colors.foregroundMuted },
@@ -224,6 +235,7 @@ export function VoiceView({ theme, layout, workspaceId, agentId }: VoiceViewProp
       </Text>
       {supported ? (
         <>
+          <VoiceSelector hostId={host.id} settings={settings} disabled={callActive} />
           <View style={styles.statusRow}>
             <View style={[styles.statusDot, { backgroundColor: status[phase].color }]} />
             <Text style={styles.statusText} accessibilityLabel={`Call status: ${status[phase].label}`}>
@@ -259,8 +271,9 @@ export function VoiceView({ theme, layout, workspaceId, agentId }: VoiceViewProp
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={phase === 'error' ? 'Retry voice call' : 'Start voice call'}
+                disabled={!canStart}
                 onPress={() => void handleStart()}
-                style={styles.primary}
+                style={[styles.primary, !canStart && { opacity: 0.5 }]}
               >
                 <Text style={styles.primaryText}>{phase === 'error' ? 'Retry' : 'Start voice'}</Text>
               </Pressable>
@@ -319,10 +332,10 @@ export function VoiceView({ theme, layout, workspaceId, agentId }: VoiceViewProp
   );
 }
 
-export function WorkspaceVoicePanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
-  return <VoiceView theme={theme} layout={layout} workspaceId={workspaceId} />;
+export function WorkspaceVoicePanel({ theme, layout, host, workspaceId }: PluginWorkspacePanelProps) {
+  return <VoiceView theme={theme} layout={layout} host={host} workspaceId={workspaceId} />;
 }
 
-export function AgentVoicePanel({ theme, layout, workspaceId, params }: PluginAgentPanelProps) {
-  return <VoiceView theme={theme} layout={layout} workspaceId={workspaceId} agentId={params.agentId} />;
+export function AgentVoicePanel({ theme, layout, host, workspaceId, params }: PluginAgentPanelProps) {
+  return <VoiceView theme={theme} layout={layout} host={host} workspaceId={workspaceId} agentId={params.agentId} />;
 }

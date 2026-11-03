@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import type { PaseoApi } from '@getpaseo/client';
-import type { VoiceEvent } from '@/shared/contracts';
+import type { ActiveVoiceSession, VoiceEvent } from '@/shared/contracts';
 import { CodexProcess, errorText, type CodexConnection, type RpcMessage } from '@/server/codex';
 import { dynamicTools, recentMessages, runPaseoTool } from '@/server/tools';
+
+import { initializeCodex, readVoices } from '@/server/voices';
 
 type Status = 'connecting' | 'live' | 'closed' | 'error';
 type ConnectionFactory = (onMessage: (message: RpcMessage) => void, onExit: (message: string) => void) => CodexConnection;
 type Session = {
-  id: string; threadId?: string; connection: CodexConnection; paseo: PaseoApi; status: Status;
+  id: string; workspaceId: string; workspaceName: string; agentId?: string; voice?: string; threadId?: string; connection: CodexConnection; paseo: PaseoApi; status: Status;
   events: VoiceEvent[]; cursor: number; lastPoll: number; createdAt: number; closedAt?: number;
   workers: Set<string>; transcript: Map<string, string>; transcriptKeys: Map<string, string>; transcriptSequence: number;
   turnBusy: boolean; pendingTurns: string[];
@@ -25,13 +27,38 @@ This is a separate voice session, not the selected agent's own voice mode. Do no
 export class VoiceSessions {
   private sessions = new Map<string, Session>();
   private pendingStarts = 0;
+  private catalog?: Promise<Awaited<ReturnType<typeof readVoices>>>;
+  private catalogConnection?: CodexConnection;
   private disposed = false;
   private sweep: ReturnType<typeof setInterval>;
   constructor(private factory: ConnectionFactory = (message, exit) => new CodexProcess(message, exit), private now = () => Date.now()) {
     this.sweep = setInterval(() => this.expire(), 5000); this.sweep.unref();
   }
 
-  async start(input: { workspaceId: string; agentId?: string; sdp: string }, paseo: PaseoApi): Promise<{ sessionId: string; answerSdp: string }> {
+  voices() {
+    if (this.disposed) return Promise.reject(new Error('Voice plugin has unloaded.'));
+    if (!this.catalog) {
+      this.catalog = (async () => {
+        const connection = this.factory(() => {}, () => {});
+        this.catalogConnection = connection;
+        try { await initializeCodex(connection); return await readVoices(connection); }
+        finally { connection.close(); this.catalogConnection = undefined; }
+      })().catch((error) => { this.catalog = undefined; throw new Error(errorText(error)); });
+    }
+    return this.catalog;
+  }
+
+  list(): ActiveVoiceSession[] {
+    this.expire();
+    return [...this.sessions.values()].flatMap((session) =>
+      session.status === 'connecting' || session.status === 'live' ? [{
+        sessionId: session.id, workspaceId: session.workspaceId, workspaceName: session.workspaceName,
+        agentId: session.agentId, threadId: session.threadId, voice: session.voice,
+        status: session.status, createdAt: session.createdAt,
+      }] : []);
+  }
+
+  async start(input: { workspaceId: string; agentId?: string; sdp: string }, paseo: PaseoApi, voice?: string): Promise<{ sessionId: string; answerSdp: string }> {
     if (this.disposed) throw new Error('Voice plugin has unloaded.');
     if (this.pendingStarts + [...this.sessions.values()].filter((session) => session.status === 'live' || session.status === 'connecting').length >= 4) throw new Error('Too many active voice sessions. Stop another session first.');
     this.pendingStarts++;
@@ -41,14 +68,17 @@ export class VoiceSessions {
     if (this.disposed) throw new Error('Voice plugin has unloaded.');
     if (!workspace) throw new Error('Workspace was not found.');
     const id = randomUUID();
-    const session: Session = { id, connection: undefined as unknown as CodexConnection, paseo, status: 'connecting', events: [], cursor: 0,
+    const session: Session = { id, workspaceId: workspace.id, workspaceName: workspace.title || workspace.name, agentId: input.agentId, voice: voice || undefined, connection: undefined as unknown as CodexConnection, paseo, status: 'connecting', events: [], cursor: 0,
       lastPoll: this.now(), createdAt: this.now(), workers: new Set(), transcript: new Map(), transcriptKeys: new Map(), transcriptSequence: 0, turnBusy: false, pendingTurns: [] };
     session.connection = this.factory((message) => this.receive(session, message), (message) => this.fail(session, message));
     this.sessions.set(id, session);
     this.add(session, 'status', 'Connecting Codex voice…');
     try {
-      await session.connection.request('initialize', { clientInfo: { name: 'paseo_codex_voice', title: 'Paseo Codex Voice', version: '0.1.0' }, capabilities: { experimentalApi: true } });
-      session.connection.notify('initialized');
+      await initializeCodex(session.connection);
+      if (voice && !(await readVoices(session.connection)).voices.includes(voice)) {
+        throw new Error('The saved voice is not supported by this Codex version. Choose another voice or Codex default.');
+      }
+      if (session.status !== 'connecting') throw new Error('Voice session was stopped.');
       const context = `Selected workspace: ${workspace.id}, ${workspace.name}, ${workspace.workspaceDirectory}. Selected agent: ${input.agentId ?? 'none'}.`;
       const started = await session.connection.request('thread/start', {
         cwd: tmpdir(), ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never',
@@ -65,7 +95,7 @@ export class VoiceSessions {
       try {
         const [, answerSdp] = await Promise.all([
           session.connection.request('thread/realtime/start', {
-            threadId: session.threadId, outputModality: 'audio', version: 'v3', clientManagedHandoffs: false, includeStartupContext: false, transport: { type: 'webrtc', sdp: input.sdp },
+            threadId: session.threadId, ...(voice ? { voice } : {}), outputModality: 'audio', version: 'v3', clientManagedHandoffs: false, includeStartupContext: false, transport: { type: 'webrtc', sdp: input.sdp },
             initialItems: [{ role: 'developer', text: `${coordinatorInstructions}\n${context}` }],
           }), answer,
         ]);
@@ -104,6 +134,7 @@ export class VoiceSessions {
   dispose(): void {
     this.disposed = true;
     clearInterval(this.sweep);
+    this.catalogConnection?.close();
     for (const session of this.sessions.values()) {
       session.status = 'closed'; session.sdp?.reject(new Error('Voice plugin unloaded.')); session.connection.close();
     }

@@ -6,10 +6,13 @@ This is a community plugin, not an official OpenAI or Paseo product. It uses Cod
 
 ## What it does
 
-- Opens from the workspace header, sidebar, workspace tab menu, existing-chat composer pill, or **⌘K → Open Codex Voice**.
+- Starts calls from the workspace header, sidebar, workspace tab menu, or **⌘K → Open Codex Voice**.
+- Shows a composer pill only for existing calls associated with that chat or its workspace.
 - Starts a separate voice session without needing an existing chat. The sidebar lets you choose an existing workspace first.
 - Lists providers and workspaces, inspects agents, creates workers, and sends follow-up prompts when requested.
 - Shows voice transcripts and accepts typed instructions during a call.
+- Lets you choose a supported Codex voice and remembers the preference on the daemon host.
+- Shows a host-wide active-call count in the sidebar, with workspace/thread navigation and individual Stop controls on the voice page.
 - Leaves worker agents running when the call ends. Worker permission requests must be handled in Paseo.
 
 The plugin does not replace Paseo's built-in microphone button or turn the current chat into a voice session.
@@ -43,12 +46,32 @@ Run the installation command on the daemon host. Keep the cloned directory in pl
 
 ## Use
 
-1. Open **Codex Voice** from the header or sidebar. From the sidebar, choose a workspace.
-2. Press **Start voice** and allow microphone access.
+1. Open **Codex Voice** from the header or sidebar. From the sidebar, choose a workspace to open its voice panel.
+2. Choose a **Voice**, then press **Start voice** and allow microphone access.
 3. Try: “List my available providers,” or “Create a Codex worker in this workspace to inspect the README and suggest improvements.”
 4. Use **Mute**, **End voice**, or the text input as needed.
 
-Closing the voice view or choosing **Change workspace** ends that call. Each call starts a new coordinator conversation; worker agents remain ordinary Paseo tasks. On narrow layouts Paseo may move the header action into its workspace menu.
+Closing the owning voice panel ends that call. Paseo can also unmount inactive panels after its workspace retention limit is reached. Each call starts a new coordinator conversation; worker agents remain ordinary Paseo tasks. On narrow layouts Paseo may move the header action into its workspace menu.
+
+### Voice choice
+
+The selector reads `thread/realtime/listVoices` from the installed Codex CLI. With Codex 0.162.1, this plugin's V3 integration supports **Juniper, Maple, Spruce, Ember, Vale, Breeze, Arbor, Sol, and Cove**. V3 uses the returned V1 list in that release; newer versions can return a separate V3 list. General Realtime API voices are not interchangeable with this list.
+
+The selection is a speaking voice, not a model. It applies to the next call through `thread/realtime/start.voice`, without changing the coordinator or worker model. **Codex default** inherits the host's `[realtime].voice` configuration; the built-in default is Cove. Preferences are shared across this plugin's clients on the same daemon and survive reloads/restarts. Uninstalling removes them. A saved voice no longer supported after a CLI change must be reselected; reload the plugin after upgrading Codex to refresh its cached list.
+
+Verified against the official [voice definitions](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/protocol/src/protocol.rs#L233), [voice resolution](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/core/src/realtime_conversation.rs#L1509), and [start API](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/app-server-protocol/src/protocol/v2.rs).
+
+### Finding and stopping active calls
+
+The **Codex Voice** sidebar entry shows a green dot and **Live** while calls are live on its host, including other workspaces/projects and clients. Connecting calls use amber; multiple calls show counts. Open it to see each call's workspace, associated Paseo thread when present, and a **Stop** control. Up to four sessions can run per host. Stopping a call leaves its worker agents running.
+
+The chat composer pill is a shortcut to existing calls, never a new-call launcher. It is hidden when no matching calls exist. A workspace-level call appears in that workspace's chats; an agent-specific call appears only in its associated chat. One call shows its state; multiple calls open a chooser. Clicking rechecks that the session still exists, then reveals its original local voice panel. Calls owned by another client, or whose original panel cannot be found, open a management-only page with status and Stop; they do not open a new microphone connection. Ended calls show an ended message.
+
+Sidebar workspace selection opens the canonical workspace voice panel, so later shortcuts can focus that same panel. The voice preference remains available on the sidebar page and in the panel.
+
+The list refreshes approximately every 1.5 seconds; a connection error displays unknown status instead of claiming no calls. Inventory checks do not renew call heartbeats. Closed/disconnected sessions disappear; an abandoned call expires after about 30 seconds, and plugin reload/unload closes all owned sessions. Calls still end when their owning voice view unmounts; navigation does not transfer microphone ownership between devices or attach a second audio connection. The coordinator's private, ephemeral Codex thread is not a navigable Paseo thread.
+
+This uses Paseo's supported sidebar and screen surfaces. The indicator is host-wide, not an aggregate across hosts, and is hidden if the sidebar/plugin item is hidden. No Paseo rebuild is needed.
 
 After pulling updates, install dependencies if needed, run the checks, and reload:
 
