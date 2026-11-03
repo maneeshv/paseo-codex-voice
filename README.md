@@ -1,5 +1,7 @@
 # Paseo Codex Voice
 
+**[Listed in the Paseo plugin directory](https://paseo.sh/plugins/maneeshv/codex-voice)**
+
 Talk to a separate Codex voice coordinator inside Paseo desktop, and ask it to create and coordinate ordinary Paseo agents.
 
 This is a community plugin, not an official OpenAI or Paseo product. It uses Codex's experimental realtime protocol; compatibility and account access can change.
@@ -32,6 +34,18 @@ The daemon must find `codex` on its PATH. Native mobile audio is not implemented
 ## Install
 
 Paseo plugins are trusted, unsandboxed code. Review the source before enabling plugins in **Settings → Plugins**. Only enable them on a daemon you trust.
+
+Install the reviewed version from the [Paseo plugin directory](https://paseo.sh/plugins/maneeshv/codex-voice) on your daemon host:
+
+```sh
+paseo plugin add maneeshv/codex-voice
+```
+
+You can also enter `maneeshv/codex-voice` in **Settings → Plugins → Plugin source** and select **Install plugin**.
+
+### Install from source
+
+For local development or to use a repository checkout:
 
 ```sh
 git clone https://github.com/maneeshv/paseo-codex-voice.git
@@ -73,7 +87,7 @@ The list refreshes approximately every 1.5 seconds; a connection error displays 
 
 This uses Paseo's supported sidebar and screen surfaces. The indicator is host-wide, not an aggregate across hosts, and is hidden if the sidebar/plugin item is hidden. No Paseo rebuild is needed.
 
-After pulling updates, install dependencies if needed, run the checks, and reload:
+For source installations, after pulling updates, install dependencies if needed, run the checks, and reload:
 
 ```sh
 paseo plugin reload codex-voice --json
