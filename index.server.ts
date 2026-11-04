@@ -15,6 +15,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(pollVoice, ({ sessionId, after }) => sessions.poll(sessionId, after));
   server.handle(stopVoice, async ({ sessionId }) => { await sessions.stop(sessionId); return {}; });
   server.handle(sendText, async ({ sessionId, text }) => { await sessions.sendText(sessionId, text); return {}; });
+  // ponytail: legacy `on` names keep 0.14 support (0.14 has no addHook). 0.15 maps them to
+  // agent.turn.after / agent.permission.before. Move to addHook and raise the minimum before removal after 2027-04-30.
   const ended = server.on('agent.turn_ended', ({ agent, outcome }) => sessions.workerEnded(agent.id, outcome.kind));
   const permission = server.on('agent.permission_requested', ({ agent }) => sessions.workerNeedsPermission(agent.id));
   return () => { ended(); permission(); sessions.dispose(); };

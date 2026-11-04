@@ -79,7 +79,7 @@ export default function contribute(client: PluginClientContext) {
     headers.clear();
   };
   void client.paseo.workspaces.list({ sync: {}, subscribe: {} }).then(({ subscription }) => {
-    // Workspace lists in 0.14 do not accept AbortSignal; release late subscriptions too.
+    // Workspace lists in 0.14–0.15 do not accept AbortSignal; release late subscriptions too.
     if (lifetime.signal.aborted) { subscription.release(); return; }
     removers.push(() => subscription.release());
     subscription.subscribe({
