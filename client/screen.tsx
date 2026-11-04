@@ -77,7 +77,7 @@ export function VoiceScreen({ theme, layout, host, navigation, params, openWorks
 
   useEffect(() => {
     if (managedSessionId) return;
-    // workspaces.list in SDK 0.14 has no AbortSignal; a cancelled flag drops late responses.
+    // workspaces.list in SDK 0.14–0.15 has no AbortSignal; a cancelled flag drops late responses.
     let cancelled = false;
     // A host change points at another daemon: its workspace ids are unrelated, so drop the query.
     setQuery('');
