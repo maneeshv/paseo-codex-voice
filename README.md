@@ -23,11 +23,13 @@ The plugin does not replace Paseo's built-in microphone button or turn the curre
 
 | Component | Compatibility |
 | --- | --- |
-| Paseo app and daemon | 0.14.x or 0.15.x; SDK pinned to 0.15.0 |
+| Paseo app and daemon | >=0.14.0; development SDK pinned to 0.15.0 |
 | Codex CLI on the daemon host | Tested with 0.162.1; must support realtime v3 over WebRTC |
 | Codex account | Signed in on the daemon host, with voice access available |
 | Client | Tested on macOS Paseo desktop; compatible browser APIs required |
 | Development | Node.js 22 and npm; lockfile included |
+
+The manifest declares a minimum, not a tested-version ceiling or a guarantee for future releases. See [validation](VALIDATION.md) for exact SDK checks and historical runtime coverage. Worker notifications use current hooks when available and legacy events on 0.14.0.
 
 The daemon must find `codex` on its PATH. Native mobile audio is not implemented. Windows/Linux desktop and physical microphone/speaker output have not been fully validated; see [validation](VALIDATION.md).
 

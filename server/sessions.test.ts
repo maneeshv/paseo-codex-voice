@@ -81,6 +81,10 @@ test('dispatches only validated tools and relays tracked worker results without 
     f.child().emit({ id: 30, method: 'item/tool/call', params: { threadId: 'coordinator-thread', tool: 'paseo_send_prompt', arguments: { agentId: 'worker', prompt: 'Run the tests' } } });
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(f.sent, ['Run the tests']); assert.equal(f.child().replies[0].result.success, true);
+    const beforeUntracked = f.child().calls.length;
+    await f.sessions.workerNeedsPermission('untracked');
+    await f.sessions.workerEnded('untracked', 'completed');
+    assert.equal(f.child().calls.length, beforeUntracked, 'untracked worker events must not reach the coordinator');
     await f.sessions.workerNeedsPermission('worker');
     assert.match(f.child().calls.at(-1)!.params.input[0].text, /Open that worker in Paseo/);
     f.child().emit({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
